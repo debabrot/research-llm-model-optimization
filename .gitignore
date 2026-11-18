@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Tree Surgery ---
+# base models and per-run artifacts are regenerated deterministically
+artifacts/
+# results/ and llm_cache/ ARE committed (PLAN §10); .env is ignored above
