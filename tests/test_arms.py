@@ -207,4 +207,4 @@ def test_retrain(ctx, outputs):
 
 def test_unknown_arm():
     with pytest.raises(ValueError, match="unknown arm"):
-        get_arm("llm_select")
+        get_arm("gradient_magic")

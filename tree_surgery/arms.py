@@ -32,6 +32,7 @@ import pandas as pd
 import scipy.sparse as sp
 
 from .datasets import Split, SplitData
+from .llm_client import Usage
 from .design_matrix import LeafIndex, leaf_design_matrix, leaf_values
 from .optimizers import DEFAULT_LAMBDAS, fit_ridge_select_lambda, lasso_supports, omp_path
 from .patcher import ModelPatcher
@@ -65,6 +66,22 @@ class ArmContext:
     lambdas: tuple[float, ...] = DEFAULT_LAMBDAS
     base_cfg: dict[str, Any] = field(default_factory=dict)
     arm_cfg: dict[str, dict[str, Any]] = field(default_factory=dict)
+    data: Optional[SplitData] = None           # metadata + train/cal/val; no test split
+    llm_cfg: dict[str, Any] = field(default_factory=dict)
+    delta_bound_std: float = 0.5
+    _views: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def leaf_view(self, variant: str):
+        """Full leaf table rendered for ``variant`` ('named' | 'anon'), built once per context."""
+        from .prompts import LeafView
+
+        if variant not in self._views:
+            self._views[variant] = LeafView.build(self.base, self.data, variant, self.index)
+        return self._views[variant]
+
+    @property
+    def delta_bound(self) -> float:
+        return self.delta_bound_std * float(np.std(self.splits["train"].y))
 
     @property
     def index(self) -> LeafIndex:
@@ -110,6 +127,9 @@ def build_context(
         lambdas=tuple(cfg.get("ridge_lambdas", DEFAULT_LAMBDAS)),
         base_cfg=cfg.get("base_model", {}),
         arm_cfg=cfg.get("arms", {}),
+        data=SplitData(data.name, data.seed, data.target_name, data.target_unit, data.features, dict(splits)),
+        llm_cfg=cfg.get("llm", {}),
+        delta_bound_std=float(cfg.get("llm_direct_delta_bound_std", 0.5)),
     )
 
 
@@ -187,6 +207,13 @@ class EditArm(Arm):
     def propose(self, ctx: ArmContext) -> list[list[int]]:  # pragma: no cover - abstract
         raise NotImplementedError
 
+    def annotate(self, records: list[CandidateRecord]) -> None:
+        """Hook: attach per-candidate metadata (LLM reasons, session ids, failure causes)."""
+
+    def extra_info(self) -> dict[str, Any]:
+        """Hook: arm-level info merged into ``ArmOutput.info`` (e.g. LLM usage)."""
+        return {}
+
     def check_budget(self, ctx: ArmContext, subsets: Sequence[Sequence[int]]) -> None:
         if len(subsets) > ctx.max_candidates:
             raise BudgetError(f"{self.name}: {len(subsets)} candidates, budget is {ctx.max_candidates}")
@@ -221,10 +248,11 @@ class EditArm(Arm):
                     meta={"val_rmse_by_lambda": fit.val_rmse_by_lambda},
                 )
             )
+        self.annotate(records)
         ok = [r for r in records if r.status == "ok"]
         if not ok:
             return ArmOutput(self.name, ctx.patcher.base_booster(), records, None, 0, 0.0,
-                             info={"note": "no valid candidate; base model reported"})
+                             info={"note": "no valid candidate; base model reported", **self.extra_info()})
         best = min(ok, key=lambda r: (r.val_rmse, r.index))
 
         cand = ctx.patcher.candidate().apply(
@@ -246,7 +274,7 @@ class EditArm(Arm):
             leaves_edited=n_edit,
             frac_params_changed=n_edit / ctx.index.num_leaves,
             info={"lam": best.lam, "linearity_err": err,
-                  "chosen_beats_original_on_val": best.val_rmse < _rmse(r_val, 0)},
+                  "chosen_beats_original_on_val": best.val_rmse < _rmse(r_val, 0), **self.extra_info()},
         )
 
 
@@ -341,14 +369,190 @@ class RetrainArm(Arm):
                          info={"num_trees": model.num_trees()})
 
 
+# --------------------------------------------------------------------------- #
+# LLM arms (PLAN §4, §5): llm_select (Approach B) and llm_direct (Approach A)
+# --------------------------------------------------------------------------- #
+class _LLMSessions:
+    """Shared session loop: rounds of ``candidates_per_session`` candidates with calibration feedback.
+
+    Feedback shown to the LLM is calibration-only. For ``select`` the calibration RMSE is
+    that of a ridge fit at the smallest grid lambda, so it carries no validation information
+    (the reported candidate still gets its lambda chosen on validation, as for every arm).
+    """
+
+    approach = "select"
+
+    def __init__(self, client, variant: str = "named", run: int = 0):
+        if variant not in ("named", "anon"):
+            raise ValueError("variant must be 'named' or 'anon'")
+        self.client, self.variant, self.run_id = client, variant, run
+        self._meta: list[dict[str, Any]] = []
+        self._info: dict[str, Any] = {}
+
+    def _spec(self, ctx: ArmContext):
+        from .prompts import PromptSpec
+
+        sess = ctx.llm_cfg.get("session", {})
+        return PromptSpec(
+            approach=self.approach,
+            max_leaves=ctx.max_leaves,
+            candidates_per_session=int(sess.get("candidates_per_session", 5)),
+            max_queries=int(sess.get("max_queries", 3)),
+            rows_per_query=int(sess.get("rows_per_query", 30)),
+            delta_bound=ctx.delta_bound if self.approach == "direct" else None,
+        )
+
+    def _feedback(self, ctx: ArmContext, cols: list[int], deltas: Optional[np.ndarray]) -> float:
+        r = ctx.r_cal
+        A = ctx.X_cal[:, cols]
+        if deltas is None:
+            from .optimizers import ridge_on_subset
+
+            deltas = ridge_on_subset(ctx.X_cal, r, cols, min(ctx.lambdas))
+        return _rmse(r, A @ np.asarray(deltas))
+
+    def run_sessions(self, ctx: ArmContext) -> list[dict[str, Any]]:
+        """Returns one dict per candidate slot: {cols, deltas, status, meta}."""
+        from .llm_session import run_session
+        from .prompts import HistoryItem, history_block, static_block
+
+        spec = self._spec(ctx)
+        view = ctx.leaf_view(self.variant)
+        static = static_block(spec, ctx.data, view, ctx.base, ctx.base_pred["cal"])
+        base_cal = _rmse(ctx.r_cal, 0)
+        n_rounds = -(-ctx.max_candidates // spec.candidates_per_session)
+        params = {"max_tokens": int(ctx.llm_cfg.get("max_tokens_per_call", 4000))}
+        if ctx.llm_cfg.get("temperature") is not None:
+            params["temperature"] = float(ctx.llm_cfg["temperature"])
+        if hasattr(self.client, "cache_tag"):
+            self.client.cache_tag = f"run{self.run_id}"
+        log0 = len(getattr(self.client, "log", []))
+
+        history: list[HistoryItem] = []
+        slots: list[dict[str, Any]] = []
+        sessions = []
+        for rnd in range(n_rounds):
+            room = ctx.max_candidates - len(slots)
+            if room <= 0:
+                break
+            text = history_block(history, base_cal, rnd + 1, n_rounds, min(room, spec.candidates_per_session))
+            spec_r = spec if room >= spec.candidates_per_session else type(spec)(**{**spec.__dict__,
+                                                                                  "candidates_per_session": room})
+            res = run_session(self.client, static, text, view, spec_r, ctx.index, params)
+            sessions.append({"round": rnd, "ok": res.ok, "error": res.error, "n_queries": res.n_queries,
+                             "n_calls": res.n_calls, "retried": res.retried, "queries": res.queries,
+                             "usage": res.usage.__dict__, "cost_usd": res.cost_usd})
+            if not res.ok:
+                for _ in range(min(room, spec_r.candidates_per_session)):
+                    slots.append({"cols": [], "deltas": None, "status": "failed",
+                                  "meta": {"round": rnd, "reason": res.error}})
+                    history.append(HistoryItem([], None, None, "invalid answer"))
+                continue
+            for c in res.proposal.candidates[:room]:
+                keys = [(l.tree_id, l.leaf_id) for l in c.leaves]
+                cols = [ctx.index.col(t, l) for t, l in keys]
+                deltas = [float(l.delta) for l in c.leaves] if self.approach == "direct" else None
+                fb = self._feedback(ctx, cols, None if deltas is None else np.asarray(deltas))
+                slots.append({"cols": cols, "deltas": deltas, "status": "ok",
+                              "meta": {"round": rnd, "rationale": c.rationale,
+                                       "reasons": [l.reason for l in c.leaves], "feedback_cal_rmse": fb}})
+                history.append(HistoryItem(keys, deltas, fb))
+
+        log = getattr(self.client, "log", [])[log0:]
+        tot = Usage()
+        for e in log:
+            tot = tot + Usage(**e["usage"])
+        self._info = {
+            "variant": self.variant, "run": self.run_id, "model": getattr(self.client, "model", "?"),
+            "llm_calls": len(log), "llm_cache_hits": sum(e["from_cache"] for e in log),
+            "llm_tokens_in": tot.prompt_tokens, "llm_tokens_out": tot.completion_tokens,
+            "llm_tokens_cached": tot.cached_tokens, "llm_tokens_reasoning": tot.reasoning_tokens,
+            "llm_cost_usd": float(sum(e["cost_usd"] for e in log)),
+            "llm_billed_usd": float(sum(e["billed_usd"] for e in log)),
+            "llm_latency_s": float(sum(e["latency_s"] for e in log)),
+            "sessions": sessions,
+            "static_prompt_chars": len(static),
+        }
+        return slots
+
+
+class LLMSelectArm(_LLMSessions, EditArm):
+    """Approach B: the LLM picks the leaves, ridge on calibration sets the values."""
+
+    name = "llm_select"
+    approach = "select"
+
+    def propose(self, ctx: ArmContext) -> list[list[int]]:
+        slots = self.run_sessions(ctx)
+        self._meta = [s["meta"] | {"status": s["status"]} for s in slots]
+        return [s["cols"] for s in slots]
+
+    def annotate(self, records: list[CandidateRecord]) -> None:
+        for rec, m in zip(records, self._meta):
+            rec.meta.update(m)
+            if m["status"] == "failed":
+                rec.meta["reason"] = m.get("reason")
+
+    def extra_info(self) -> dict[str, Any]:
+        return dict(self._info)
+
+
+class LLMDirectArm(_LLMSessions, Arm):
+    """Approach A: the LLM picks the leaves and the deltas (|delta| <= bound)."""
+
+    name = "llm_direct"
+    approach = "direct"
+
+    def _run(self, ctx: ArmContext) -> ArmOutput:
+        slots = self.run_sessions(ctx)
+        if len(slots) > ctx.max_candidates or any(len(s["cols"]) > ctx.max_leaves for s in slots):
+            raise BudgetError(f"{self.name}: budget exceeded")
+        r_cal, r_val = ctx.r_cal, ctx.r_val
+        records = []
+        for i, s in enumerate(slots):
+            if s["status"] != "ok":
+                records.append(CandidateRecord(i, [], [], _rmse(r_cal, 0), _rmse(r_val, 0), status="failed",
+                                               meta=s["meta"]))
+                continue
+            d = np.asarray(s["deltas"])
+            records.append(CandidateRecord(
+                i, [ctx.index.key(c) for c in s["cols"]], [float(x) for x in d],
+                _rmse(r_cal, ctx.X_cal[:, s["cols"]] @ d), _rmse(r_val, ctx.X_val[:, s["cols"]] @ d),
+                meta=s["meta"]))
+        ok = [r for r in records if r.status == "ok"]
+        if not ok:
+            return ArmOutput(self.name, ctx.patcher.base_booster(), records, None, 0, 0.0,
+                             info={"note": "no valid candidate; base model reported", **self._info})
+        best = min(ok, key=lambda r: (r.val_rmse, r.index))
+        if any(abs(x) > ctx.delta_bound + 1e-12 for x in best.deltas):
+            raise BudgetError(f"{self.name}: delta outside the bound")
+        cand = ctx.patcher.candidate().apply(dict(zip(best.leaves, best.deltas)), max_leaves=ctx.max_leaves)
+        cols = [ctx.index.col(*k) for k in best.leaves]
+        linear_val = ctx.base_pred["val"] + ctx.X_val[:, cols] @ np.asarray(best.deltas)
+        err = float(np.max(np.abs(cand.predict(ctx.splits["val"].X) - linear_val)))
+        if err > LINEARITY_TOL:
+            raise AssertionError(f"{self.name}: patched model disagrees with linear prediction by {err:.2e}")
+        n = len(cand.edited_leaves)
+        return ArmOutput(self.name, cand.booster, records, best.index, n, n / ctx.index.num_leaves,
+                         info={"linearity_err": err, "chosen_beats_original_on_val": best.val_rmse < _rmse(r_val, 0),
+                               **self._info})
+
+
+LLM_ARMS = {"llm_select": LLMSelectArm, "llm_direct": LLMDirectArm}
+
+
 ARMS: dict[str, type[Arm]] = {
     a.name: a for a in (OriginalArm, RandomOptArm, SparseOptArm, RefitArm, RetrainArm)
 }
 NON_LLM_ARMS = tuple(ARMS)
 
 
-def get_arm(name: str) -> Arm:
+def get_arm(name: str, client=None, variant: str = "named", run: int = 0) -> Arm:
+    if name in LLM_ARMS:
+        if client is None:
+            raise ValueError(f"{name} needs an LLM client (see tree_surgery.llm_client.make_client)")
+        return LLM_ARMS[name](client, variant=variant, run=run)
     try:
         return ARMS[name]()
     except KeyError:
-        raise ValueError(f"unknown arm {name!r}; known: {sorted(ARMS)}") from None
+        raise ValueError(f"unknown arm {name!r}; known: {sorted(ARMS) + sorted(LLM_ARMS)}") from None

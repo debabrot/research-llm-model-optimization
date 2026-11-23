@@ -46,7 +46,7 @@ llm_direct_delta_bound_std: 0.5   # |delta| <= 0.5 * std(y_train)
 llm_runs_per_cell: 3
 
 # ---------------------------------------------------------------------------
-# LLM settings: used from Phase 3. Nothing here is called yet.
+# LLM settings (Phase 3+). Default mode is replay: no keys, no spend.
 # Keys come from .env (see .env.example), never from this file.
 # ---------------------------------------------------------------------------
 llm:
@@ -56,7 +56,13 @@ llm:
     cheap: deepseek/deepseek-v4.1-flash   # Option A: the only model in the current budget
     strong: anthropic/claude-opus-5.5     # needs a separate budget; not run under Option A
   reasoning_effort: low                   # fixed per model and recorded with results
+  temperature: 1.0                        # provider default; fixed and recorded (3 runs = 3 samples)
   max_tokens_per_call: 4000               # no single call can run away
+
+  prices:                                 # USD per 1M tokens, for the budget guard and projections.
+    # OpenRouter reports the real charge per call (usage.cost); that is what gets logged.
+    deepseek/deepseek-v4.1-flash: {input: 0.10, output: 0.60, cache_read: 0.03}   # conservative
+    anthropic/claude-opus-5.5:    {input: 4.00, output: 20.00, cache_read: 0.20}
 
   session:                                # one query-tool loop (PLAN §5, changelog)
     max_queries: 3                        # query_leaves calls per session

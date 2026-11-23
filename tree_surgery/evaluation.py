@@ -7,6 +7,10 @@ bootstrap CI and a Wilcoxon signed-rank test.
 With 5 seeds and one deterministic run per arm, the smallest two-sided Wilcoxon
 p-value possible is 1/16 = 0.0625, so the bootstrap CI carries the decision; the
 Wilcoxon p is reported alongside it.
+
+With several LLM runs per seed, the pre-registered CI resamples (seed, run) pairs as
+if independent. A seed-clustered CI (:func:`cluster_bootstrap_ci`) is reported next to
+it; with one run per seed the two coincide.
 """
 
 from __future__ import annotations
@@ -80,6 +84,28 @@ def bootstrap_ci(
     return float(np.quantile(means, alpha / 2)), float(np.quantile(means, 1 - alpha / 2))
 
 
+def cluster_bootstrap_ci(
+    diffs: pd.DataFrame, cluster: str = "seed", n_boot: int = 10_000, alpha: float = 0.05, seed: int = 0
+) -> tuple[float, float]:
+    """Two-stage bootstrap: resample clusters (seeds), then rows (LLM runs) within each.
+
+    Use when there are several LLM runs per seed: the runs share a seed's data split and
+    base model, so treating them as independent (``bootstrap_ci``) makes the CI too narrow.
+    Equals the plain bootstrap when every cluster has one row.
+    """
+    groups = [g["diff"].to_numpy(float) for _, g in diffs.groupby(cluster, sort=True)]
+    if len(groups) < 2:
+        return (float("nan"), float("nan"))
+    rng = np.random.default_rng(seed)
+    k = len(groups)
+    means = np.empty(n_boot)
+    for b in range(n_boot):
+        picked = rng.integers(0, k, size=k)
+        vals = [groups[i][rng.integers(0, len(groups[i]), size=len(groups[i]))] for i in picked]
+        means[b] = np.mean(np.concatenate(vals))
+    return float(np.quantile(means, alpha / 2)), float(np.quantile(means, 1 - alpha / 2))
+
+
 def wilcoxon_p(x: Iterable[float]) -> float:
     """Two-sided Wilcoxon signed-rank p-value; NaN if undefined (no non-zero differences)."""
     from scipy.stats import wilcoxon
@@ -105,6 +131,7 @@ def compare_arms(
     for g, d in diffs.groupby(by, sort=True):
         x = d["diff"].to_numpy()
         lo, hi = bootstrap_ci(x, n_boot=n_boot, seed=seed)
+        clo, chi = cluster_bootstrap_ci(d, "seed", n_boot=n_boot, seed=seed)
         rows.append(
             {
                 by: g,
@@ -116,6 +143,10 @@ def compare_arms(
                 "ci_lo": lo,
                 "ci_hi": hi,
                 "ci_excludes_0": bool(np.isfinite(lo) and (lo > 0 or hi < 0)),
+                "n_seeds": int(d["seed"].nunique()),
+                "cluster_ci_lo": clo,
+                "cluster_ci_hi": chi,
+                "cluster_ci_excludes_0": bool(np.isfinite(clo) and (clo > 0 or chi < 0)),
                 "wilcoxon_p": wilcoxon_p(x),
                 "a_wins": int(np.sum(x < 0)),
                 "mean_rel_diff_pct": float(100 * np.mean(x / d["b"].to_numpy())),
