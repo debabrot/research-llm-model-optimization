@@ -58,7 +58,7 @@ The non-LLM competitor is therefore strong, and the experiment is designed to gi
 
 ## 3. Base model
 
-- LightGBM regression, `num_leaves=15`, `learning_rate=0.05`, up to 1,000 rounds with **early stopping on validation** (patience 50). Other hyperparameters at their defaults, fixed in `configs/experiment.yaml`.
+- LightGBM regression, `num_leaves=15`, `learning_rate=0.05`, up to **5,000** rounds (raised from 1,000 on 2026-11-23, see changelog) with **early stopping on validation** (patience 50). Other hyperparameters at their defaults, fixed in `configs/experiment.yaml`.
 - Trained on **train only**.
 - The base model, its predictions and its metrics are saved per (dataset, seed).
 
@@ -288,3 +288,58 @@ research-llm-model-optimization/
 - 2026-11-17: **Decision: query-tool access replaces the full leaf dump (§5).** The LLM gets a `query_leaves` tool (filter by feature/rule text, n_cal, residual; sort by any column; ≤ 50 rows per call) plus a static summary. It never receives a residual-ranked shortlist it didn't ask for. Base model stays at §3 settings (lr 0.05).
 - 2026-11-17: **Cost estimate (`scripts/estimate_cost.py`; assumptions until the Phase 3 gate measures real tokens).** OpenRouter list prices: Opus 5.5 $4 in / $20 out / $0.20 cache read; DeepSeek V4.1 Flash ≈ $0.05–0.14 in / ≈ $0.57 out. A query session is about 50K input (36K of it cacheable) and 7.7K output. Full grid at 1 candidate per session: Flash ≈ $6 per run, Opus ≈ $187 per run (≈ $560 for 3 runs). Available budget: ₹1,000 OpenRouter credit (≈ $10.5). **Proposal (pending confirmation):** each session proposes 5 candidates, so 20 candidates = 4 feedback rounds; Flash runs the full grid × 3 runs (≈ $4); Opus is cut to an exploratory pilot, run only after the Flash results; hard spend caps on the API key and in the client.
 - 2026-11-18: **Budget locked: Option A, LLM spend ≤ ₹200 (≈ $2.10).** Changes to §6/§7: max candidates per run **20 → 10** for every edit arm (fairness preserved); LLM sessions propose 5 candidates each (2 feedback rounds), allow ≤ 3 `query_leaves` calls of ≤ 30 rows, use low reasoning effort, and cap each call at 4K output tokens. The LLM is **DeepSeek V4.1 Flash** only (`deepseek/deepseek-v4.1-flash` via OpenRouter), on the full grid: both approaches, named + anon, D1 + D2, 5 seeds, 3 runs. Estimated cost ₹100–185. **Claude Opus 5.5 moves out of v1 scope.** It is configured (`anthropic/claude-opus-5.5`) but needs a separate budget (≈ ₹4,000 for one full run at these settings). Enforcement: an OpenRouter key credit limit, a client budget guard and per-call `max_tokens`.
+- 2026-11-22: **D2 re-measured on the real loader (`fetch_california_housing`), §3 settings (lr 0.05, ≤ 1,000 rounds, patience 50).** Leaf-table tokens ≈ chars/4 of `render_leaf_table`.
+
+  | Dataset | Seed | Trees | Leaves | Table tokens |
+  |---|---|---|---|---|
+  | D1 | 0 | 267 | 4,005 | 169K |
+  | D1 | 1 | 288 | 4,320 | 183K |
+  | D1 | 2 | 298 | 4,470 | 190K |
+  | D1 | 3 | 245 | 3,675 | 156K |
+  | D1 | 4 | 322 | 4,830 | 205K |
+  | D2 | 0 | 1,000 | 15,000 | 605K |
+  | D2 | 1 | 1,000 | 15,000 | 600K |
+  | D2 | 2 | 998 | 14,970 | 603K |
+  | D2 | 3 | 1,000 | 15,000 | 607K |
+  | D2 | 4 | 999 | 14,985 | 603K |
+
+  D1 matches the 2026-11-17 numbers. D2 lands at the top of the proxy range (15K leaves, ~600K tokens), which confirms the query-tool decision. **Open issue, decide before Phase 2:** D2 hits the 1,000-round cap on every seed (998–1,000 trees), so early stopping never fires and the D2 base model may be under-fit. §3 relies on early stopping to keep the baseline honest. Options: raise the round cap for D2, or accept the cap and document it as a limitation.
+- 2026-11-23: **Decision: round cap raised 1,000 → 5,000 for all datasets (§3).** Resolves the 2026-11-22 open issue. Applied globally so both datasets share the same hyperparameters; D1 is unaffected because it early-stops at 245–322 rounds. `retrain` uses the same cap. **LLM cost is unchanged:** the LLM never receives the full table. The static block holds only summary counts, and `query_leaves` returns a fixed ≤ 30 rows per call. With `num_leaves=15` fixed, rule length doesn't grow with the number of trees. Costs that do grow are local compute only: D2 base training, `retrain`, the leaf table build, and a wider sparse design matrix for `sparse_opt`/`refit`. **Verification pending:** rerun the leaf-count script and confirm every D2 seed stops below 5,000 rounds. If any seed hits 5,000, revisit (e.g. lr 0.1 for D2 only).
+- 2026-11-23: **5,000-round cap verified.** Every D2 seed now early-stops: 1,014–1,578 trees, 15.2K–23.7K leaves (test RMSE 0.453–0.465). D1 unchanged (245–322 trees).
+- 2026-11-23: **Phase 2 complete; gate run done (no LLM spend).** `optimizers.py` (closed-form ridge on a leaf subset, OMP, Lasso path), `arms.py` (`original`, `random_opt`, `sparse_opt`, `refit`, `retrain` behind one interface), paired stats in `evaluation.py`, `runner.py`. 149 tests pass (76 Phase 1 + 73 new). Full grid: `python -m tree_surgery.runner` (~1 min) → `results/phase2/`.
+
+  **Implementation choices (within the plan, recorded here):**
+  - *Candidate* = one leaf subset. Its values come from ridge on calibration with λ picked from the §6 grid on validation; λ selection doesn't count against the 10-candidate budget. The same rule will apply to `llm_select`.
+  - The shared `EditArm` base enforces the budget (raises on > 10 leaves, > 10 candidates, duplicates or unknown leaves), selects on validation, and checks that the patched booster matches `ŷ + X·d` (< 1e-8). Arms receive train / cal / val only; the test split isn't in their context.
+  - `sparse_opt` (default `omp`): one greedy OMP path on unit-normalised leaf columns, with candidates = supports of size 1..10. `lasso` is available as an alternative (Lasso path restricted to its sparse end).
+  - `random_opt` draws from leaves with ≥ 1 calibration row (others can't be fitted).
+  - `refit`: decay ∈ {0, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99} chosen on validation.
+  - **Identifiability (relevant to §9):** leaf columns are often exact duplicates on calibration (leaves in different trees covering the same rows), and a leaf holding most of a tree's rows can be repaired through its siblings plus a shift. In a planted C1 test, OMP recovers 97–99% of the damage, but leaf-level recall is sometimes only 2/3. Both §9 metrics are needed.
+
+  **Gate results (test RMSE, mean over 5 seeds; paired diff vs `original` with 95% bootstrap CI):**
+
+  | Arm | D1 test RMSE | D1 vs truth | Δ vs original (D1) | D2 test RMSE | Δ vs original (D2) |
+  |---|---|---|---|---|---|
+  | original | 4.2917 | 1.4197 | – | 0.4586 | – |
+  | random_opt | 4.2953 | 1.4262 | +0.09% [−0.0019, +0.0129] | 0.4588 | +0.03% [−0.0002, +0.0004] |
+  | sparse_opt | 4.2988 | 1.4385 | **+0.16% [+0.0012, +0.0150], 0/5 wins** | 0.4585 | −0.02% [−0.0008, +0.0005] |
+  | refit | 4.2907 | 1.4227 | −0.02% [−0.0024, +0.0005] | 0.4583 | −0.08% [−0.0009, −0.0000] |
+  | retrain | 4.2893 | 1.3664 | −0.06% [−0.0242, +0.0195] | 0.4502 | **−1.84% [−0.0109, −0.0061], 5/5** |
+
+  **Reading.** With an early-stopped base model, a 10-leaf edit fitted on calibration finds no generalisable signal. `sparse_opt` lowers calibration RMSE on every cell (by up to 0.10 on D1) and validation RMSE slightly, but test RMSE doesn't follow. On D1 it is significantly *worse* than doing nothing, and further from the truth. Validation selection over 10 candidates × 6 λ (≈ 3K rows) overfits. `refit` picks decay 0.99 (grid edge, i.e. "change almost nothing") on 9/10 cells. Only `retrain`, which also learns new structure from the extra 15% of data, helps clearly, and only on D2.
+
+  **Consequence for the decision rule (§8), open, decide before Phase 4:** because `sparse_opt` ≤ `original`, "`llm_select` beats `sparse_opt`" can be met by an arm that just edits less. Candidate amendments: (a) also require `llm_select` < `original` with a CI excluding 0; (b) add the no-edit model as a validation-guarded fallback candidate in every edit arm. Not applied; the pre-registered rule is unchanged until decided.
+- 2026-11-23: **Phase 3 built; gate partly done (mock dry run ✅, real-call token check pending).** `llm_client.py` (OpenRouter/OpenAI-compatible + Anthropic adapter, cache/replay, budget guard, mock), `prompts.py` (static block, history block, `query_leaves`, Pydantic schemas, named/anon leaf views), `llm_session.py` (session loop, mock policy), `llm_select` / `llm_direct` in `arms.py`, runner `--llm mock|replay|live`. 221 tests pass (72 new). Phase 2 numbers are unchanged.
+
+  **Implementation choices (within the plan, recorded here):**
+  - *Session:* static prompt (system) + history (user) → ≤ 3 `query_leaves` calls → JSON answer. Once the query limit is reached the call is made with `tool_choice="none"`. An invalid answer gets one retry with the validation error; a second failure fails the session, which counts as 5 failed candidates against the budget. API errors, budget stops and replay cache misses stop the run instead (a resumed run reuses the cache).
+  - *Feedback is calibration-only.* For `llm_select`, the calibration RMSE shown in the history is from a ridge fit at the smallest grid λ (1e-3), so it carries no validation information. The reported candidate still gets its λ chosen on validation, as in every edit arm. A test checks that the whole conversation is identical when validation and test labels change.
+  - *`anon`:* `f0..fN` in a per-seed shuffled order, generic target `y`, no units or descriptions; ranges and target mean/std are kept (§5). The instructions are word-for-word identical to `named`. Ranges can still hint at identity (e.g. `[0, 23]`, `[0, 1]`); that is the plan as written.
+  - *Static prompt* holds counts and quantiles only, no leaf lines. It is fixed per (dataset, seed, variant, approach), so providers can cache the prefix. Size: 2.3–2.8K chars (≈ 650 tokens). One 30-row query result is ≈ 0.9–1.3K tokens.
+  - *Runs:* the cache key includes the run index, so the 3 runs per cell are 3 independent samples (temperature 1.0, recorded in config), not one answer replayed. A run index missing from the cache fails in replay.
+  - *Spend control:* per-model prices in config; the guard refuses any call whose worst case (estimated input + `max_tokens` output, no cache discount) could cross ₹200 total, tracked across runs in `llm_cache/spend_ledger.json`. Logged cost is OpenRouter's reported `usage.cost`.
+  - *Stats:* a **seed-clustered bootstrap CI** (resample seeds, then LLM runs within a seed) is reported next to the pre-registered CI. The 3 runs of a seed share its data split and base model, so the pre-registered CI, which resamples (seed, run) pairs as if independent, comes out too narrow. The decision rule still uses the pre-registered CI until changed.
+
+  **Gate, mock dry run:** full grid (2 datasets × 5 seeds × 2 approaches × 2 variants × 3 runs = 120 LLM runs, 240 sessions, 720 calls), 0 failed candidates, about 3 min (`results/phase3_mock_dryrun/`, labelled as not a result). **Cost projection** from measured prompt sizes (`scripts/measure_tokens.py --dry`): ≈ 11.8K input tokens per session; 4.5–9.7K output depending on reasoning length → **≈ ₹88–159 for the full grid on DeepSeek Flash**, within the ₹200 cap. **Pending:** `python scripts/measure_tokens.py` with the OpenRouter key (OpenRouter is unreachable from the build sandbox): 8 real sessions (~32 calls, ≈ ₹3–6, capped at ₹15) that are real grid cells and stay in the cache. It prints real token counts, the projected grid cost and the served model id to pin in config.
+
+  **Evidence for the open decision-rule issue (2026-11-23 Phase 2 entry).** In the mock dry run, a scripted policy with no LLM (random leaves among those its two queries returned) "beats" `sparse_opt` on D1: `llm_select/named − sparse_opt` = −0.18%, pre-registered CI [−0.0144, −0.0025], Wilcoxon p = 0.022, 11/15 wins. Against `original` it is flat (CI [−0.0040, +0.0020]). It doesn't beat `sparse_opt` on D2, so the rule's "both datasets" condition wasn't met. For `llm_direct/named − sparse_opt` on D1, the pre-registered CI excludes 0 but the seed-clustered CI [−0.0169, +0.0001] doesn't. **Decide before the Phase 4 live run:** (a) require `llm_select` < `original` too; (b) a validation-guarded no-edit fallback for every edit arm; (c) whether the decision rule uses the seed-clustered CI.
