@@ -44,7 +44,7 @@ class BaseModelInfo:
 def train_base_model(
     data: SplitData,
     params: Optional[dict[str, Any]] = None,
-    num_boost_round: int = 1000,
+    num_boost_round: int = 5000,
     early_stopping_rounds: int = 50,
 ) -> lgb.Booster:
     p = {**DEFAULT_PARAMS, **(params or {}), "seed": data.seed}
@@ -120,7 +120,7 @@ def fit_base_model(
     booster = train_base_model(
         data,
         params=params,
-        num_boost_round=cfg.get("num_boost_round", 1000),
+        num_boost_round=cfg.get("num_boost_round", 5000),
         early_stopping_rounds=cfg.get("early_stopping_rounds", 50),
     )
     info = describe_base_model(booster, data, params)

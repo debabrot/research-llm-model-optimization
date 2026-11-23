@@ -7,12 +7,12 @@ We take a trained LightGBM regressor, freeze its tree structure, and let differe
 | Phase | What | Status |
 |---|---|---|
 | 1 | Foundation: data, base model, leaf inspector, patcher, design matrix, tests, notebook 01 | ✅ done |
-| 2 | Non-LLM arms (`original`, `random_opt`, `sparse_opt`, `refit`, `retrain`) + runner | next (no API cost) |
-| 3 | LLM client (OpenRouter, cache/replay, budget guard), query tool, prompts | – |
+| 2 | Non-LLM arms (`original`, `random_opt`, `sparse_opt`, `refit`, `retrain`) + runner | ✅ done (gate results below) |
+| 3 | LLM client (OpenRouter, cache/replay, budget guard), query tool, prompts | next |
 | 4 | LLM arms on DeepSeek V4.1 Flash | – |
 | 5 | Corruption experiment, results notebook, blog post | – |
 
-No experimental results yet.
+No LLM results yet. Phase 2 gate results (non-LLM arms) are [below](#phase-2-gate-results-non-llm-arms).
 
 ---
 
@@ -54,7 +54,11 @@ python scripts/quickstart.py --dataset california --seed 2
 # 3. Walk through it interactively
 jupyter lab notebooks/01_leaf_surgery_101.ipynb
 
-# 4. LLM cost estimator (no API calls; assumptions until Phase 3 measures real tokens)
+# 4. Run the non-LLM experiment grid: 2 datasets x 5 seeds x 5 arms (~1 min)
+python -m tree_surgery.runner                     # writes results/phase2/{results.csv,candidates.jsonl,summary.md}
+python -m tree_surgery.runner --datasets delivery --seeds 0 1 --arms original sparse_opt
+
+# 5. LLM cost estimator (no API calls; assumptions until Phase 3 measures real tokens)
 python scripts/estimate_cost.py
 ```
 
@@ -104,7 +108,7 @@ The client will also stop itself before the call that would cross the cap, and i
 
 ---
 
-## What's in Phase 1
+## What's in the package
 
 | Module | Does |
 |---|---|
@@ -113,6 +117,10 @@ The client will also stop itself before the call that would cross the cap, and i
 | `tree_surgery/inspector.py` | Decision path → readable rule for every leaf, calibration residual stats, leaf-line rendering |
 | `tree_surgery/patcher.py` | Independent edit candidates, atomic validated edits, exact rollback, save/load |
 | `tree_surgery/design_matrix.py` | Sparse one-hot leaf matrix: `predict(X) == X_leaf @ leaf_values` |
+| `tree_surgery/optimizers.py` | *(Phase 2)* Closed-form ridge on a leaf subset (λ on validation), OMP and Lasso-path leaf selection |
+| `tree_surgery/arms.py` | *(Phase 2)* All arms behind one interface; `EditArm` enforces the budget, selects on validation, verifies `ŷ + X·d` |
+| `tree_surgery/evaluation.py` | Metrics, paired differences, bootstrap CI, Wilcoxon |
+| `tree_surgery/runner.py` | *(Phase 2)* Experiment grid from config → `results/<phase>/` |
 
 **Guarantees covered by tests:**
 - Editing leaf (t, l) by δ moves exactly the samples in that leaf, by exactly δ.
@@ -120,6 +128,21 @@ The client will also stop itself before the call that would cross the cap, and i
 - Candidates are fully independent.
 - Save/load and rollback are bit-exact.
 - Every rendered rule selects exactly the rows LightGBM routes to that leaf, including missing-value handling.
+- *(Phase 2)* Edit arms never exceed 10 leaves / 10 candidates (violations raise); arm outcomes don't change when test labels are replaced with NaN; the chosen candidate is the validation optimum; the patched model equals the linear prediction; OMP recovers planted leaf edits (up to leaves that are identical on calibration).
+
+## Phase 2 gate results (non-LLM arms)
+
+Test RMSE, mean over 5 seeds. Δ is the paired difference vs `original` with a 95% bootstrap CI (negative = better). Full tables: [`results/phase2/summary.md`](results/phase2/summary.md).
+
+| Arm | Budget | D1 test RMSE | D1 vs truth | Δ vs original (D1) | D2 test RMSE | Δ vs original (D2) |
+|---|---|---|---|---|---|---|
+| `original` | – | 4.2917 | 1.4197 | – | 0.4586 | – |
+| `random_opt` | ≤ 10 leaves | 4.2953 | 1.4262 | +0.09% (n.s.) | 0.4588 | +0.03% (n.s.) |
+| `sparse_opt` | ≤ 10 leaves | 4.2988 | 1.4385 | **+0.16%, worse on 5/5 seeds** | 0.4585 | −0.02% (n.s.) |
+| `refit` | all leaves | 4.2907 | 1.4227 | −0.02% (n.s.) | 0.4583 | −0.08% |
+| `retrain` | new model | 4.2893 | 1.3664 | −0.06% (n.s.) | 0.4502 | **−1.84%, better on 5/5** |
+
+**What this says.** The early-stopped base model leaves almost nothing for a 10-leaf edit to fix. Edits fitted on calibration always lower calibration RMSE, and validation picks the candidate that looks best, but test RMSE doesn't follow. On D1 the main numerical competitor is slightly *worse* than doing nothing. Only retraining, which also learns new structure from the extra data, clearly helps, and only on California Housing. This is the bar the LLM arms will be measured against in Phase 4.
 
 ## D1: the delivery-time generator
 
@@ -144,5 +167,6 @@ tree_surgery/             the package
 scripts/                  quickstart.py, estimate_cost.py
 notebooks/01_…            leaf surgery walkthrough (Phase 1)
 tests/                    pytest suite
-llm_cache/, results/      filled from Phase 3 onward (committed)
+results/phase2/          non-LLM gate run (committed)
+llm_cache/                filled from Phase 3 onward (committed)
 ```

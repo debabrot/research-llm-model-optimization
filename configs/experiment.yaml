@@ -26,14 +26,22 @@ base_model:        # PLAN §3
     force_row_wise: true
     num_threads: 1
     verbose: -1
-  num_boost_round: 1000
+  num_boost_round: 5000   # raised from 1000 on 2026-11-23 (PLAN changelog)
   early_stopping_rounds: 50
 
 edit_budget:       # PLAN §4, §6 (used from Phase 2). Applies to EVERY edit arm, LLM or not.
   max_leaves: 10
   max_candidates: 10   # was 20; cut for the ₹200 budget (PLAN changelog 2026-11-18)
 
-ridge_lambdas: [0.001, 0.01, 0.1, 1, 10, 100]
+ridge_lambdas: [0.001, 0.01, 0.1, 1, 10, 100]   # on (1/n)||r - X_S d||^2 + lambda ||d||^2, chosen on val
+
+arms:              # PLAN §4 (Phase 2). Candidate = leaf subset; values by ridge on cal, lambda on val.
+  random_opt:
+    min_n_cal: 1         # draw only leaves that hold calibration rows (others can't be fitted)
+  sparse_opt:
+    method: omp          # omp: supports of size 1..10 along one OMP path | lasso: Lasso-path supports
+  refit:                 # Booster.refit on cal; decay chosen on val. Ceiling, no edit budget.
+    decay_rates: [0.0, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
 llm_direct_delta_bound_std: 0.5   # |delta| <= 0.5 * std(y_train)
 llm_runs_per_cell: 3
 

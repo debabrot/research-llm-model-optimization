@@ -1,6 +1,6 @@
 [project]
 name = "tree-surgery"
-version = "0.1.0"
+version = "0.2.0"
 description = "Can an LLM in the optimization loop beat standard optimization when editing a trained LightGBM model's leaf values?"
 readme = "README.md"
 requires-python = ">=3.10"
