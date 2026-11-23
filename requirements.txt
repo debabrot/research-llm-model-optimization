@@ -1,0 +1,9 @@
+# For Colab / plain pip. Local development: `uv sync --extra dev` (see pyproject.toml).
+lightgbm>=4.3
+numpy>=1.26
+scipy>=1.11
+pandas>=2.1
+scikit-learn>=1.4
+pyyaml>=6.0
+pydantic>=2.5
+matplotlib>=3.8

@@ -1,0 +1,60 @@
+# Tree Surgery experiment configuration. Mirrors PLAN.md §2, §3, §6.
+# Changes after experiments start must be logged in PLAN.md's changelog.
+
+seeds: [0, 1, 2, 3, 4]
+
+splits:            # PLAN §2: random 50 / 15 / 15 / 20
+  train: 0.50
+  cal: 0.15
+  val: 0.15
+  test: 0.20
+
+datasets:
+  delivery:        # D1, semi-synthetic
+    n_rows: 20000
+  california:      # D2, sklearn California Housing
+    n_rows: 20640
+
+base_model:        # PLAN §3
+  params:
+    objective: regression
+    metric: rmse
+    num_leaves: 15
+    learning_rate: 0.05
+    # determinism: same (data, seed) -> bit-identical model
+    deterministic: true
+    force_row_wise: true
+    num_threads: 1
+    verbose: -1
+  num_boost_round: 1000
+  early_stopping_rounds: 50
+
+edit_budget:       # PLAN §4, §6 (used from Phase 2). Applies to EVERY edit arm, LLM or not.
+  max_leaves: 10
+  max_candidates: 10   # was 20; cut for the ₹200 budget (PLAN changelog 2026-11-18)
+
+ridge_lambdas: [0.001, 0.01, 0.1, 1, 10, 100]
+llm_direct_delta_bound_std: 0.5   # |delta| <= 0.5 * std(y_train)
+llm_runs_per_cell: 3
+
+# ---------------------------------------------------------------------------
+# LLM settings: used from Phase 3. Nothing here is called yet.
+# Keys come from .env (see .env.example), never from this file.
+# ---------------------------------------------------------------------------
+llm:
+  provider: openrouter                    # OpenAI-compatible endpoint
+  base_url: https://openrouter.ai/api/v1
+  models:
+    cheap: deepseek/deepseek-v4.1-flash   # Option A: the only model in the current budget
+    strong: anthropic/claude-opus-5.5     # needs a separate budget; not run under Option A
+  reasoning_effort: low                   # fixed per model and recorded with results
+  max_tokens_per_call: 4000               # no single call can run away
+
+  session:                                # one query-tool loop (PLAN §5, changelog)
+    max_queries: 3                        # query_leaves calls per session
+    rows_per_query: 30
+    candidates_per_session: 5             # 10 candidates per run = 2 feedback rounds
+
+  budget:
+    max_spend_inr: 200                    # hard stop in the client, before the call that would cross it
+    inr_per_usd: 95                       # OpenRouter bills in USD; ₹200 ≈ $2.10

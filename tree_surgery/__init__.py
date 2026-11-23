@@ -1,0 +1,31 @@
+"""Tree Surgery: can an LLM improve a trained LightGBM model by editing its leaf values?"""
+
+from .datasets import SplitData, anon_mapping, load_dataset
+from .design_matrix import LeafIndex, delta_vector, leaf_design_matrix, leaf_values
+from .inspector import extract_rules, leaf_table, render_leaf_line, render_leaf_table
+from .patcher import Candidate, EditError, LeafEdit, ModelPatcher, load_candidate
+from .train import fit_base_model, load_model, train_base_model
+
+__all__ = [
+    "SplitData",
+    "anon_mapping",
+    "load_dataset",
+    "LeafIndex",
+    "delta_vector",
+    "leaf_design_matrix",
+    "leaf_values",
+    "extract_rules",
+    "leaf_table",
+    "render_leaf_line",
+    "render_leaf_table",
+    "Candidate",
+    "EditError",
+    "LeafEdit",
+    "ModelPatcher",
+    "load_candidate",
+    "fit_base_model",
+    "load_model",
+    "train_base_model",
+]
+
+__version__ = "0.1.0"
