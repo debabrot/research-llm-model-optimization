@@ -8,7 +8,7 @@ We take a trained LightGBM regressor, freeze its tree structure, and let differe
 |---|---|---|
 | 1 | Foundation: data, base model, leaf inspector, patcher, design matrix, tests, notebook 01 | ✅ done |
 | 2 | Non-LLM arms (`original`, `random_opt`, `sparse_opt`, `refit`, `retrain`) + runner | ✅ done (gate results below) |
-| 3 | LLM client (OpenRouter, cache/replay, budget guard), query tool, prompts, LLM arms (mock dry run) | ✅ done, except the real-call token check (needs your key) |
+| 3 | LLM client (OpenRouter, cache/replay, budget guard), query tool, prompts, LLM arms (mock dry run) | ✅ done; real-call check found and fixed a token-cap issue, `llm_direct` re-check pending |
 | 4 | LLM arms on DeepSeek V4.1 Flash | next |
 | 5 | Corruption experiment, results notebook, blog post | – |
 
@@ -64,6 +64,10 @@ python scripts/measure_tokens.py --dry            # token/cost projection for th
 
 # 6. Phase 3 gate, real calls (needs .env, about ₹3-6, hard-capped at ₹15)
 python scripts/measure_tokens.py
+python scripts/measure_tokens.py --approaches llm_direct     # one arm only
+
+# 7. Phase 4: one run index at a time (keeps a partial grid balanced if the budget cap is hit)
+python -m tree_surgery.runner --arms all --llm live --run-ids 0 --out results/phase4_run0
 ```
 
 Expected output from `quickstart.py` (D1, seed 0):

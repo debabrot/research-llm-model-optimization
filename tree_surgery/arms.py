@@ -421,7 +421,7 @@ class _LLMSessions:
         static = static_block(spec, ctx.data, view, ctx.base, ctx.base_pred["cal"])
         base_cal = _rmse(ctx.r_cal, 0)
         n_rounds = -(-ctx.max_candidates // spec.candidates_per_session)
-        params = {"max_tokens": int(ctx.llm_cfg.get("max_tokens_per_call", 4000))}
+        params = {"max_tokens": int(ctx.llm_cfg.get("max_tokens_per_call", 12000))}
         if ctx.llm_cfg.get("temperature") is not None:
             params["temperature"] = float(ctx.llm_cfg["temperature"])
         if hasattr(self.client, "cache_tag"):
@@ -440,7 +440,8 @@ class _LLMSessions:
                                                                                   "candidates_per_session": room})
             res = run_session(self.client, static, text, view, spec_r, ctx.index, params)
             sessions.append({"round": rnd, "ok": res.ok, "error": res.error, "n_queries": res.n_queries,
-                             "n_calls": res.n_calls, "retried": res.retried, "queries": res.queries,
+                             "n_calls": res.n_calls, "retried": res.retried, "truncated": res.truncated,
+                             "queries": res.queries,
                              "usage": res.usage.__dict__, "cost_usd": res.cost_usd})
             if not res.ok:
                 for _ in range(min(room, spec_r.candidates_per_session)):

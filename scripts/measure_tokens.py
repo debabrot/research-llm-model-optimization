@@ -2,6 +2,7 @@
 
     python scripts/measure_tokens.py --dry            # offline: mock structure + assumptions, no key
     python scripts/measure_tokens.py                  # LIVE: ~32 calls, about ₹3-6, hard-capped at ₹15
+    python scripts/measure_tokens.py --approaches llm_direct   # LIVE, one arm only (~₹3-4)
 
 Live mode runs 4 real LLM runs (8 sessions) that are also real grid cells:
 
@@ -40,7 +41,7 @@ def grid_sessions(cfg) -> int:
 
 
 def project(per_session_usd: dict[str, float], cfg, label: str) -> float:
-    n = grid_sessions(cfg) // len(APPROACHES)
+    n = grid_sessions(cfg) // len(APPROACHES)  # sessions per approach
     b = cfg["llm"]["budget"]
     total = sum(v * n for v in per_session_usd.values())
     inr = total * b["inr_per_usd"]
@@ -70,6 +71,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry", action="store_true", help="offline: mock client, no key, no spend")
     ap.add_argument("--max-inr", type=float, default=15.0, help="hard cap for THIS script's spend (₹)")
+    ap.add_argument("--approaches", nargs="+", default=list(APPROACHES), choices=list(APPROACHES),
+                    help="measure only these arms, e.g. --approaches llm_direct")
     args = ap.parse_args()
     cfg = load_config()
 
@@ -80,13 +83,13 @@ def main() -> None:
         client = make_client(cfg["llm"], mode="live", max_spend_inr=args.max_inr)
         print(f"LIVE: model {client.model}; this script is capped at ₹{args.max_inr:.0f}")
 
-    per: dict[str, list[float]] = {a: [] for a in APPROACHES}
+    per: dict[str, list[float]] = {a: [] for a in args.approaches}
     served = set()
     for ds, seed, variant, run in CELLS:
         data = load_dataset(ds, seed=seed)
         booster, _ = fit_base_model(data, cfg["base_model"])
         ctx = build_context(data, booster, cfg)
-        for arm in APPROACHES:
+        for arm in args.approaches:
             log0 = len(client.log)
             out = get_arm(arm, client, variant, run).run(ctx)
             i = out.info
@@ -95,6 +98,7 @@ def main() -> None:
                 print(f"{ds:10s} {variant:5s} {arm:10s} round {s['round']}: {s['n_calls']} calls, "
                       f"{s['n_queries']} queries, in {u['prompt_tokens']:,} (cached {u['cached_tokens']:,}), "
                       f"out {u['completion_tokens']:,} (reasoning {u['reasoning_tokens']:,}), ${s['cost_usd']:.5f}"
+                      f"{'  [' + str(s.get('truncated', 0)) + ' truncated]' if s.get('truncated') else ''}"
                       f"{'' if s['ok'] else '  FAILED: ' + str(s['error'])}")
                 per[arm].append(s["cost_usd"])
             served |= {e.get("model") for e in client.log[log0:] if e.get("model")}

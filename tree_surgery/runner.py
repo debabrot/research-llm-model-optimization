@@ -15,6 +15,7 @@ Outputs, under ``--out`` (default ``results/phase2``):
     python -m tree_surgery.runner --datasets delivery --seeds 0 1 --arms original sparse_opt
     python -m tree_surgery.runner --arms all --llm mock --out results/phase3_mock
     python -m tree_surgery.runner --arms llm_select llm_direct --llm replay   # from llm_cache/, no keys
+    python -m tree_surgery.runner --arms all --llm live --run-ids 0 --out results/phase4_run0   # one run index
 
 LLM arms run once per variant (named / anon) and LLM run (``--llm-runs``, default from config).
 """
@@ -76,11 +77,16 @@ LLM_INFO_KEYS = ("llm_calls", "llm_cache_hits", "llm_tokens_in", "llm_tokens_out
                  "llm_tokens_reasoning", "llm_cost_usd", "llm_billed_usd", "llm_latency_s")
 
 
-def _jobs(arms: Sequence[str], variants: Sequence[str], llm_runs: int):
+def _run_ids(llm_runs) -> list[int]:
+    """``llm_runs``: a count (runs 0..n-1) or an explicit list of run indices."""
+    return list(range(int(llm_runs))) if isinstance(llm_runs, (int, np.integer)) else [int(r) for r in llm_runs]
+
+
+def _jobs(arms: Sequence[str], variants: Sequence[str], llm_runs):
     for a in arms:
         if a in LLM_ARMS:
             for v in variants:
-                for r in range(llm_runs):
+                for r in _run_ids(llm_runs):
                     yield a, v, r
         else:
             yield a, "-", 0
@@ -95,7 +101,7 @@ def run_cell(
     n_rows: Optional[int] = None,
     client=None,
     variants: Sequence[str] = ("named", "anon"),
-    llm_runs: int = 1,
+    llm_runs: int | Sequence[int] = 1,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run all ``arms`` for one (dataset, seed). Returns (result rows, candidate records)."""
     t0 = time.perf_counter()
@@ -155,10 +161,11 @@ def run_grid(
     verbose: bool = True,
     client=None,
     variants: Sequence[str] = ("named", "anon"),
-    llm_runs: Optional[int] = None,
+    llm_runs: int | Sequence[int] | None = None,
 ) -> pd.DataFrame:
+    """``llm_runs``: number of LLM runs per cell (0..n-1) or explicit run indices, e.g. ``[0]``."""
     cfg = cfg or load_config()
-    llm_runs = int(llm_runs if llm_runs is not None else cfg.get("llm_runs_per_cell", 1))
+    llm_runs = llm_runs if llm_runs is not None else int(cfg.get("llm_runs_per_cell", 1))
     if any(a in LLM_ARMS for a in arms) and client is None:
         raise ValueError("LLM arms requested but no client given (see llm_client.make_client)")
     all_rows, all_cands = [], []
@@ -284,6 +291,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     ap.add_argument("--model", default=None, help="LLM model id (default: $LLM_MODEL or llm.models.cheap)")
     ap.add_argument("--variants", nargs="+", default=["named", "anon"], choices=["named", "anon"])
     ap.add_argument("--llm-runs", type=int, default=None, help="LLM runs per cell (default: llm_runs_per_cell)")
+    ap.add_argument("--run-ids", type=int, nargs="+", default=None,
+                    help="only these LLM run indices, e.g. --run-ids 0 (overrides --llm-runs). Run 0 for the whole "
+                         "grid first, then 1, then 2: if the budget cap stops a pass, the finished runs stay balanced")
     args = ap.parse_args(argv)
     if args.arms == ["all"]:
         args.arms = list(NON_LLM_ARMS) + list(LLM_ARMS)
@@ -293,7 +303,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
         client = make_client(cfg["llm"], mode=args.llm, model=args.model)
     df = run_grid(args.datasets, args.seeds, args.arms, cfg, args.out, args.artifacts or None,
-                  client=client, variants=args.variants, llm_runs=args.llm_runs)
+                  client=client, variants=args.variants,
+                  llm_runs=args.run_ids if args.run_ids is not None else args.llm_runs)
     print()
     print(summarize(df))
 

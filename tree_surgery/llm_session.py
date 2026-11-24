@@ -25,6 +25,9 @@ from .llm_client import LLMClient, LLMResponse, ToolCall, Usage
 from .prompts import QUERY_TOOL_NAME, LeafView, PromptSpec, ProposalError, parse_proposal, query_tool_schema, run_query
 
 RETRY_TEMPLATE = "Your answer could not be used: {error}\nReply again with only the corrected JSON object."
+TRUNCATED_RETRY = ("Your previous reply ran out of output tokens before it gave an answer. "
+                   "Keep your reasoning short and reply with only the JSON object.")
+TRUNCATED = "ran out of output tokens before answering (finish_reason=length)"
 
 
 @dataclass
@@ -34,6 +37,7 @@ class SessionResult:
     n_queries: int = 0
     n_calls: int = 0
     retried: bool = False
+    truncated: int = 0                   # calls that hit max_tokens with no answer (reasoning ate the budget)
     usage: Usage = field(default_factory=Usage)
     cost_usd: float = 0.0
     queries: list[str] = field(default_factory=list)   # raw query arguments, for analysis
@@ -74,7 +78,12 @@ def run_session(
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": _tool_result(tc, view, spec, res)})
             continue
 
+        cut = r.finish_reason == "length" and not (r.content or "").strip() and not r.tool_calls
+        if cut:
+            res.truncated += 1
         try:
+            if cut:
+                raise ProposalError(TRUNCATED)
             if r.tool_calls and not (r.content or "").strip():
                 raise ProposalError("expected the final JSON answer, got another tool call (query limit reached)")
             res.proposal = parse_proposal(r.content, spec.approach, index, spec.max_leaves,
@@ -86,7 +95,7 @@ def run_session(
                 return res
             res.retried = True
             messages.append({"role": "assistant", "content": r.content or ""})
-            messages.append({"role": "user", "content": RETRY_TEMPLATE.format(error=e)})
+            messages.append({"role": "user", "content": TRUNCATED_RETRY if cut else RETRY_TEMPLATE.format(error=e)})
     res.error = "call limit reached without a valid answer"
     return res
 

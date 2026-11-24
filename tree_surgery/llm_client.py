@@ -511,7 +511,7 @@ def make_client(
     budget = llm_cfg.get("budget", {})
     cap_usd = float(budget.get("max_spend_inr", 200)) / float(budget.get("inr_per_usd", 95))
     guard = BudgetGuard(inner, cap_usd, price, Path(cache_dir) / "spend_ledger.json",
-                        default_max_tokens=int(llm_cfg.get("max_tokens_per_call", 4000)))
+                        default_max_tokens=int(llm_cfg.get("max_tokens_per_call", 12000)))
     if max_spend_inr is not None:
         guard.max_usd = min(guard.max_usd, guard.spent_usd + float(max_spend_inr) / float(budget.get("inr_per_usd", 95)))
     return CachedClient(guard, model, "live", cache_dir)

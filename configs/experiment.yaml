@@ -57,7 +57,8 @@ llm:
     strong: anthropic/claude-opus-5.5     # needs a separate budget; not run under Option A
   reasoning_effort: low                   # fixed per model and recorded with results
   temperature: 1.0                        # provider default; fixed and recorded (3 runs = 3 samples)
-  max_tokens_per_call: 4000               # no single call can run away
+  max_tokens_per_call: 12000              # reasoning + answer combined (OpenRouter); billed only for tokens used.
+                                          # Was 4000: DeepSeek reasoned past it and returned empty answers (2026-11-24).
 
   prices:                                 # USD per 1M tokens, for the budget guard and projections.
     # OpenRouter reports the real charge per call (usage.cost); that is what gets logged.

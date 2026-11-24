@@ -480,3 +480,28 @@ def test_runner_with_llm_arms(tmp_path):
     assert sum("sessions" in r for r in recs) == 8
     summary = (tmp_path / "summary.md").read_text()
     assert "llm_select/named − sparse_opt" in summary and "## LLM usage" in summary
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-24: truncation (reasoning ate max_tokens) and run selection
+# --------------------------------------------------------------------------- #
+def test_session_truncation_retry_then_success(ctx):
+    k = ctx.index.key(0)
+    good = json.dumps({"candidates": [{"leaves": [{"tree_id": k[0], "leaf_id": k[1]}]}]})
+    inner = Scripted([LLMResponse("", [], "length"), LLMResponse(good, [], "stop")])
+    rec = Recorder(CachedClient(inner, "s", "live", None))
+    res = _session(ctx, rec)
+    assert res.ok and res.retried and res.truncated == 1
+    assert rec.requests[-1]["messages"][-1]["content"].startswith("Your previous reply ran out of output tokens")
+
+
+def test_session_truncated_twice_fails_with_clear_reason(ctx):
+    inner = Scripted([LLMResponse(None, [], "length"), LLMResponse("", [], "length")])
+    res = _session(ctx, CachedClient(inner, "s", "live", None))
+    assert not res.ok and res.truncated == 2 and "finish_reason=length" in res.error
+
+
+def test_run_ids_select_runs(tmp_path):
+    df = run_grid(["delivery"], [0], ["llm_select"], CFG, None, verbose=False, client=mock(), llm_runs=[2],
+                  variants=("named",))
+    assert df.run.tolist() == [2]
