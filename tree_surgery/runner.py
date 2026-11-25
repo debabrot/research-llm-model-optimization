@@ -49,12 +49,15 @@ DEFAULT_COMPARISONS: tuple[tuple[str, str], ...] = (
     ("refit", "original"),
     ("retrain", "original"),
     ("sparse_opt", "retrain"),
-    # LLM arms (PLAN §8 decision rule); only shown when present
+    # LLM arms, PLAN §8 (amended 2026-11-25): Q1 vs sparse_opt, Q2 vs original, Q3 vs retrain,
+    # then semantics (named - anon). Decide on the seed-clustered CI. Only shown when present.
     ("llm_select/named", "sparse_opt"),
     ("llm_select/named", "original"),
     ("llm_select/named", "retrain"),
-    ("llm_select/named", "llm_select/anon"),
     ("llm_direct/named", "sparse_opt"),
+    ("llm_direct/named", "original"),
+    ("llm_direct/named", "retrain"),
+    ("llm_select/named", "llm_select/anon"),
     ("llm_direct/named", "llm_direct/anon"),
 )
 
@@ -241,6 +244,8 @@ def summarize(
     comps = [c for c in comparisons if set(c) <= present]
     if comps:
         lines += ["", "## Paired differences in test RMSE (a − b; negative = a better)", "",
+                  "Decisions (PLAN §8) use the seed-clustered CI. LLM rows: Q1 vs sparse_opt, Q2 vs original, "
+                  "Q3 vs retrain; named − anon is the semantics check.", "",
                   "| dataset | a − b | mean diff | rel. % | 95% bootstrap CI | CI excl. 0 | seed-clustered CI | "
                   "excl. 0 | a wins | Wilcoxon p |",
                   "|---|---|---|---|---|---|---|---|---|---|"]

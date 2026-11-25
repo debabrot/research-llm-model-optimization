@@ -168,12 +168,26 @@ If output is invalid, retry once with the validation error; if it is still inval
 - Paired differences per (dataset, seed), e.g. `llm_select − sparse_opt`. Report the mean and a 95% bootstrap CI over seeds × LLM runs, plus a Wilcoxon signed-rank test.
 - Report every arm and every model, including negative results.
 
-### Decision rule (pre-registered)
+### Decision rule (pre-registered; amended 2026-11-25 before any Phase 4 LLM run, see changelog)
 
-- **LLM adds value:** `llm_select` beats `sparse_opt` on test RMSE, with the 95% CI of the paired difference excluding 0, on **both** datasets, for a given LLM.
-- **LLM is practically useful:** additionally, `llm_select` ≥ `retrain` (no worse within its CI).
-- **Semantics matter:** `named` beats `anon` with a CI excluding 0.
-- Anything else is reported as a negative or inconclusive result.
+This is an experiment: a negative answer is as publishable as a positive one. The rule fixes **which sentence the results allow us to publish**, not what counts as success.
+
+**Uncertainty.** Every comparison is a paired difference in test RMSE per (dataset, seed). The decision uses the 95% **seed-clustered** bootstrap CI: resample seeds, then LLM runs within a seed, because the 3 runs of a seed share its data split and base model. A difference is "real" only if that CI excludes 0. The unclustered CI and the Wilcoxon p are reported alongside.
+
+**Three questions**, answered separately for each LLM, each approach (`llm_select`, `llm_direct`) and each dataset, using the `named` variant:
+
+| # | Question | Comparison | "Yes" means |
+|---|---|---|---|
+| Q1 | Does the LLM choose edits better than a numerical optimizer with the same data and the same 10-leaf budget? | LLM − `sparse_opt` | lower test RMSE, CI excludes 0 |
+| Q2 | Do the LLM's edits actually improve the model? | LLM − `original` | lower test RMSE, CI excludes 0 |
+| Q3 | Does it beat simply retraining on the extra data (ordinary supervised ML)? | LLM − `retrain` | lower test RMSE, CI excludes 0 |
+
+**Published claims:**
+- **"The LLM beats supervised ML"** only if Q1, Q2 and Q3 are all "yes" on **both** datasets for that LLM and approach.
+- Otherwise the result is reported as it stands, per question. Examples: "chooses better leaves than the optimizer, but the edits don't improve the model" (Q1 yes, Q2 no), or "improves the model but not as much as retraining" (Q1, Q2 yes, Q3 no). If no question is "yes", the claim is "the LLM could not beat standard supervised ML in this setting."
+- A "yes" on Q1 alone is never reported as "the LLM adds value": `sparse_opt` was worse than `original` in Phase 2, so an LLM that only edits less would pass Q1.
+- **Semantics (separate finding):** `named` − `anon` for each approach, same CI. "Feature meaning helped" only if `named` is better with the CI excluding 0.
+- Every arm, model and comparison is reported, including negative and inconclusive results.
 
 ---
 
@@ -362,3 +376,4 @@ research-llm-model-optimization/
 - 2026-11-24: **`llm_direct` re-checked at the 12,000-token cap: 4/4 sessions valid; Phase 3 gate passed.** Same 2 cells, run 0. Per session: 3–4 calls, 14.1–21.5K input, 9.0–15.9K output (6.5–14.5K reasoning), $0.0060–0.0128 (mean $0.0095). One answer call still hit the 12K cap (delivery round 0) and was recovered by the retry; each such call costs ≈ $0.007. Spend so far ₹9.28.
 
   **Full-grid projection:** `llm_select` ≈ $0.74 (measured 2026-11-24 at the 4K cap with no failures, so its answers already fit and the higher cap shouldn't change its cost) + `llm_direct` ≈ $1.14 → ≈ $1.88 ≈ ₹179, plus ₹9.28 spent ≈ **₹188 of the ₹200 cap**. Too thin to run all 3 runs blind. **Plan:** Phase 4 runs `--run-ids 0` over the whole grid first (≈ ₹60), then re-projects from actual spend. If runs 1–2 don't fit, either stop at 2 runs per cell (logged as a deviation) or raise the cap; decide then.
+- 2026-11-25: **Decision rule amended (§8), before any Phase 4 LLM run.** Prompted by Phase 2 (`sparse_opt` is worse than `original` on D1) and the Phase 3 dry run (a scripted mock with no LLM "beat" `sparse_opt` on D1, and the unclustered CI over 3 runs per seed was narrower than the seed-clustered one). Changes: (a) the headline claim now also requires beating `original` (Q2) and `retrain` (Q3), not only `sparse_opt`; the old "practically useful: no worse than `retrain`" criterion is replaced by Q3; (c) decisions use the seed-clustered CI. Not adopted: (b), a no-edit fallback candidate for every edit arm; with Q2 in place it adds little, and it would change the Phase 2 arms. Framing made explicit: the rule maps results to publishable claims; negative results are reported as findings. Runner summary now lists Q1–Q3 for both LLM arms and `named` − `anon`.
